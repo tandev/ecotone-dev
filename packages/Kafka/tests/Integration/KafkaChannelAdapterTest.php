@@ -6,6 +6,7 @@ namespace Test\Ecotone\Kafka\Integration;
 
 use Ecotone\Kafka\Api\KafkaHeader;
 use Ecotone\Kafka\Attribute\KafkaConsumer;
+use Ecotone\Kafka\Configuration\KafkaAdmin;
 use Ecotone\Kafka\Configuration\KafkaBrokerConfiguration;
 use Ecotone\Kafka\Configuration\KafkaConsumerConfiguration;
 use Ecotone\Kafka\Configuration\KafkaPublisherConfiguration;
@@ -26,10 +27,10 @@ use Ecotone\Modelling\AggregateMessage;
 use Ecotone\Modelling\Attribute\QueryHandler;
 use Ecotone\Test\LicenceTesting;
 use PHPUnit\Framework\Attributes\DataProvider;
-use PHPUnit\Framework\Attributes\RunTestsInSeparateProcesses;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Uid\Uuid;
 use Test\Ecotone\Kafka\ConnectionTestCase;
+use Test\Ecotone\Kafka\Fixture\Calendar\ScheduleMeetingKafkaConsumer;
 use Test\Ecotone\Kafka\Fixture\ChannelAdapter\ExampleKafkaConsumer;
 use Test\Ecotone\Kafka\Fixture\KafkaConsumer\KafkaConsumerWithDelayedRetryExample;
 use Test\Ecotone\Kafka\Fixture\KafkaConsumer\KafkaConsumerWithFailStrategyExample;
@@ -40,7 +41,6 @@ use Test\Ecotone\Kafka\Fixture\KafkaConsumer\KafkaConsumerWithInstantRetryExampl
  * licence Enterprise
  * @internal
  */
-#[RunTestsInSeparateProcesses]
 final class KafkaChannelAdapterTest extends TestCase
 {
     public function test_sending_and_receiving_from_kafka_topic(): void
@@ -458,5 +458,48 @@ final class KafkaChannelAdapterTest extends TestCase
         $kafkaPublisher->send('test-payload');
 
         $this->assertTrue(true);
+    }
+
+    public function test_message_consumer_from_raw_message_with_conversion(): void
+    {
+        $topicName = Uuid::v7()->toRfc4122();
+        $publisherReferenceName = 'kafka_produce_schedule_meeting';
+        $consumerReferenceName = 'kafka_consumer_schedule_meeting';
+
+        $scheduleMeetingConsumer = new ScheduleMeetingKafkaConsumer();
+        $ecotoneLite = EcotoneLite::bootstrapFlowTesting(
+            [ScheduleMeetingKafkaConsumer::class],
+            [
+                KafkaBrokerConfiguration::class => ConnectionTestCase::getConnection(),
+                $scheduleMeetingConsumer,
+            ],
+            ServiceConfiguration::createWithDefaults()
+                ->withSkippedModulePackageNames(ModulePackageList::allPackagesExcept([ModulePackageList::ASYNCHRONOUS_PACKAGE, ModulePackageList::KAFKA_PACKAGE]))
+                ->withExtensionObjects([
+                    KafkaPublisherConfiguration::createWithDefaults($topicName, $publisherReferenceName),
+                    TopicConfiguration::createWithReferenceName('testTopic', $topicName),
+                    KafkaConsumerConfiguration::createWithDefaults($consumerReferenceName),
+                ]),
+            licenceKey: LicenceTesting::VALID_LICENCE,
+        );
+
+        $calendarId = Uuid::v7()->toRfc4122();
+        $meetingId = Uuid::v7()->toRfc4122();
+
+        /** @var KafkaAdmin $kafkaAdmin */
+        $kafkaAdmin = $ecotoneLite->getServiceFromContainer(KafkaAdmin::class);
+        $kafkaAdmin->getTopicForProducer($publisherReferenceName . '.handler')
+            ->produce(RD_KAFKA_PARTITION_UA, 0, json_encode(['calendarId' => $calendarId, 'meetingId' => $meetingId]));
+        $kafkaAdmin->getProducer($publisherReferenceName. '.handler')->flush(8000);
+
+        $ecotoneLite->run($consumerReferenceName, ExecutionPollingMetadata::createWithTestingSetup(
+            maxExecutionTimeInMilliseconds: 30000
+        ));
+
+        $scheduledMeetings = $ecotoneLite->sendQueryWithRouting('getScheduledMeetings');
+
+        self::assertCount(1, $scheduledMeetings);
+        self::assertEquals($calendarId, $scheduledMeetings[0]->calendarId);
+        self::assertEquals($meetingId, $scheduledMeetings[0]->meetingId);
     }
 }
