@@ -6,6 +6,7 @@ namespace Test\Ecotone\Kafka\Integration;
 
 use Ecotone\Kafka\Api\KafkaHeader;
 use Ecotone\Kafka\Attribute\KafkaConsumer;
+use Ecotone\Kafka\Configuration\KafkaAdmin;
 use Ecotone\Kafka\Configuration\KafkaBrokerConfiguration;
 use Ecotone\Kafka\Configuration\KafkaConsumerConfiguration;
 use Ecotone\Kafka\Configuration\KafkaPublisherConfiguration;
@@ -33,6 +34,7 @@ use stdClass;
 use Symfony\Component\Uid\Uuid;
 use Test\Ecotone\Kafka\ConnectionTestCase;
 use Test\Ecotone\Kafka\Fixture\ChannelAdapter\ExampleKafkaConsumer;
+use Test\Ecotone\Kafka\Fixture\KafkaConsumer\KafkaConsumerFailingExample;
 use Test\Ecotone\Kafka\Fixture\KafkaConsumer\KafkaConsumerWithDelayedRetryExample;
 use Test\Ecotone\Kafka\Fixture\KafkaConsumer\KafkaConsumerWithFailStrategyExample;
 use Test\Ecotone\Kafka\Fixture\KafkaConsumer\KafkaConsumerWithInstantRetryAndErrorChannelExample;
@@ -267,6 +269,43 @@ final class KafkaChannelAdapterTest extends TestCase
         $ecotoneLite->run($endpointId, ExecutionPollingMetadata::createWithTestingSetup(failAtError: true));
         $messages = $ecotoneLite->sendQueryWithRouting('consumer.getAttributeMessagePayloads');
         $this->assertCount(2, $messages);
+
+        $this->assertNotNull($ecotoneLite->getMessageChannel('customErrorChannel')->receive());
+    }
+
+    public function test_default_custom_error_channel_on_consumer(): void
+    {
+        $topicName = Uuid::v7()->toRfc4122();
+        $publisherReferenceName =  'kafka_publisher';
+        $consumerReferenceName = 'kafka_consumer_attribute';
+
+        $ecotoneLite = EcotoneLite::bootstrapFlowTesting(
+            [KafkaConsumerFailingExample::class],
+            [
+                KafkaBrokerConfiguration::class => ConnectionTestCase::getConnection(),
+                new KafkaConsumerFailingExample(),
+            ],
+            ServiceConfiguration::createWithDefaults()
+                            ->withDefaultErrorChannel('customErrorChannel')
+                            ->withSkippedModulePackageNames(ModulePackageList::allPackagesExcept([ModulePackageList::ASYNCHRONOUS_PACKAGE, ModulePackageList::KAFKA_PACKAGE]))
+                            ->withExtensionObjects([
+                                KafkaPublisherConfiguration::createWithDefaults($topicName, $publisherReferenceName),
+                                TopicConfiguration::createWithReferenceName('testTopicFailure', $topicName),
+                                KafkaConsumerConfiguration::createWithDefaults($consumerReferenceName),
+                                SimpleMessageChannelBuilder::createDirectMessageChannel('customErrorChannel'),
+                            ]),
+            licenceKey: LicenceTesting::VALID_LICENCE,
+        );
+
+        /** @var KafkaAdmin $kafkaAdmin */
+        $kafkaAdmin = $ecotoneLite->getServiceFromContainer(KafkaAdmin::class);
+        $kafkaAdmin->getTopicForProducer($publisherReferenceName . '.handler')
+            ->produce(RD_KAFKA_PARTITION_UA, 0, Uuid::v7()->toRfc4122());
+        $kafkaAdmin->getProducer($publisherReferenceName. '.handler')->flush(8000);
+
+        $ecotoneLite->run($consumerReferenceName, ExecutionPollingMetadata::createWithTestingSetup(
+            maxExecutionTimeInMilliseconds: 30000
+        )->withStopOnError(false));
 
         $this->assertNotNull($ecotoneLite->getMessageChannel('customErrorChannel')->receive());
     }
